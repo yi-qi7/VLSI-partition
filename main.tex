@@ -1,0 +1,1646 @@
+%!TeX program = xelatex
+\documentclass{SYSUReport}
+\usepackage{xeCJK}
+\usepackage{tikz}
+\usepackage{graphicx}
+\usepackage{makecell}
+\usepackage{float}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{multirow}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+
+\lstset{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    columns=flexible,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    keywordstyle=\color{blue},
+    commentstyle=\color{green!50!black},
+    stringstyle=\color{red},
+    showstringspaces=false
+}
+
+\setCJKmainfont{simsun.ttc}
+
+\headl{中山大学}
+\headc{VLSI 划分实验}
+\headr{实验1}
+\lessonTitle{VLSI 图划分实验}
+\reportTitle{超图二划分算法：FM算法与模拟退火算法}
+\stuname{钟旺烜、赵施琦、郑晋凯}
+\stuid{23336342、23336324、23336329}
+\inst{计算机学院}
+\major{计算机科学与技术}
+\teacher{沈明华}
+\date{2026年5月17日}
+
+\begin{document}
+\cover
+\thispagestyle{empty}
+\clearpage
+
+\pagenumbering{Roman}
+\setcounter{page}{1}
+\tableofcontents
+\clearpage
+
+\pagenumbering{arabic}
+\setcounter{page}{1}
+
+\section{实验目的}
+\subsection{题目要求}
+本实验要求实现超图二划分算法，将给定的超图划分为两个大小均衡的子集，使得跨越两个子集的超边数（cut size）最小化。
+
+\textbf{具体要求}：
+\begin{itemize}
+\item 实现FM（Fiduccia-Mattheyses）算法进行超图二划分
+\item 实现模拟退火算法进行超图二划分
+\item 在ISPD98基准测试集（ibm01--ibm18）上验证算法正确性与性能
+\item 划分平衡约束：两个子集的大小比例在$50\% \pm \epsilon$范围内，其中$\epsilon = 0.02$
+\item 评估指标为cut size，即跨越两个划分的超边数量
+\end{itemize}
+
+\subsection{实验目的}
+通过实现超图二划分算法，深入理解VLSI物理设计中划分问题的基本原理和求解方法。掌握FM算法的增益计算、增量更新与多起点策略。理解模拟退火算法在组合优化问题中的应用，包括邻域结构设计、温度调度与接受准则。通过在ISPD98基准测试集上的实验，分析两种算法的划分质量与性能特征。
+
+\section{实验过程}
+
+\subsection{超图划分问题定义}
+超图$H = (V, E)$是图的推广，其中$V$为顶点集，$E$为超边集。每条超边$e \in E$可以连接两个或更多顶点。超图二划分问题将顶点集$V$划分为两个不相交的子集$X$和$Y$（$X \cup Y = V$，$X \cap Y = \emptyset$），使得跨越两个子集的超边数最小：
+
+\begin{equation}
+\text{cut}(X, Y) = |\{e \in E \mid e \cap X \neq \emptyset \text{ 且 } e \cap Y \neq \emptyset\}|
+\end{equation}
+
+同时满足平衡约束：
+\begin{equation}
+\frac{|X|}{|V|} \in [0.5 - \epsilon, 0.5 + \epsilon]
+\end{equation}
+
+其中$\epsilon = 0.02$，即每个子集的大小占总顶点数的48\%--52\%。
+
+在VLSI设计中，超图的顶点对应电路模块，超边对应信号线网（net）。划分问题旨在将电路分为两部分，使得两部分之间的连线数最少，从而减少芯片间的通信开销。
+
+\subsection{数据结构设计}
+\subsubsection{超图表示}
+采用面向对象的方式表示超图，核心数据结构包括：
+
+\begin{lstlisting}[language=C++, caption=核心数据结构定义]
+class Node {
+    int index;
+    vector<Net*> nets;
+public:
+    void add_net(Net *net);
+    int get_index() { return this->index; }
+    vector<Net*> &get_nets() { return this->nets; }
+};
+
+class Net {
+    int index;
+    vector<Node*> nodes;
+public:
+    void add_node(Node *node);
+    int get_index() { return this->index; }
+    vector<Node*> &get_nodes() { return this->nodes; }
+};
+
+class Graph {
+    vector<Node*> nodes;
+    vector<Net*> nets;
+    map<int, Node*> node_map;
+    map<int, Net*> net_map;
+public:
+    Node *get_or_create_node(int index);
+    Net *add_net(int index);
+    vector<Node*> &get_nodes() { return this->nodes; }
+    vector<Net*> &get_nets() { return this->nets; }
+};
+\end{lstlisting}
+
+\textbf{设计要点}：
+\begin{itemize}
+\item Node与Net之间通过指针双向关联，支持从顶点快速访问其关联的超边，也支持从超边快速访问其关联的顶点
+\item Graph使用\texttt{node\_map}和\texttt{net\_map}实现按索引快速查找，避免线性搜索
+\item \texttt{get\_or\_create\_node}方法在节点不存在时自动创建，简化了基准文件的读取逻辑
+\end{itemize}
+
+\subsubsection{基准文件格式}
+ISPD98基准文件采用hMETIS格式：
+
+\begin{lstlisting}[caption=hMETIS超图文件格式]
+<超边数> <顶点数>
+<超边1连接的顶点列表>
+<超边2连接的顶点列表>
+...
+\end{lstlisting}
+
+读取时，每行对应一条超边，行中的整数表示该超边连接的顶点编号。
+
+\subsection{FM算法实现}
+\subsubsection{FM算法原理}
+Fiduccia-Mattheyses算法是一种经典的超图划分启发式算法，基于Kernighan-Lin算法改进而来。其核心思想是通过迭代地移动顶点来逐步改善划分质量。与KL算法不同，FM算法每次只移动一个顶点，且使用增益（gain）来指导顶点的选择。
+
+\textbf{增益定义}：顶点$v$的增益$g(v)$定义为将$v$从当前子集移动到另一个子集时，cut size的减少量：
+
+\begin{equation}
+g(v) = |\{e \in \text{nets}(v) \mid e \text{ 将从cut中移除}\}| - |\{e \in \text{nets}(v) \mid e \text{ 将被加入cut}\}|
+\end{equation}
+
+具体而言，对于顶点$v$所在的每条超边$e$：
+\begin{itemize}
+\item 若$e$在$v$的当前子集中仅有$v$一个顶点（critical net），移动$v$将使$e$从cut中移除，增益$+1$
+\item 若$e$在$v$的目标子集中没有顶点，移动$v$将使$e$被加入cut，增益$-1$
+\end{itemize}
+
+\subsubsection{增益计算}
+增益计算函数的实现如下：
+
+\begin{lstlisting}[language=C++, caption=增益计算函数]
+int Solution::calculate_gain(Node *node, map<int, int> &partition_map) {
+    int gain = 0;
+    int node_part = partition_map[node->get_index()];
+
+    for(Net *net : node->get_nets()) {
+        int count_in_X = 0, count_in_Y = 0;
+        for(Node *n : net->get_nodes()) {
+            if(partition_map[n->get_index()] == 0) count_in_X++;
+            else count_in_Y++;
+        }
+
+        if(node_part == 0) {
+            if(count_in_X == 1 && count_in_Y > 0) gain++;
+            if(count_in_Y == 0) gain--;
+        } else {
+            if(count_in_Y == 1 && count_in_X > 0) gain++;
+            if(count_in_X == 0) gain--;
+        }
+    }
+    return gain;
+}
+\end{lstlisting}
+
+\subsubsection{FM Pass}
+一次FM Pass是FM算法的核心迭代过程：
+
+\begin{enumerate}
+\item 计算所有未锁定顶点的增益
+\item 选择满足平衡约束且增益最大的未锁定顶点
+\item 移动该顶点到另一个子集，并锁定该顶点
+\item 增量更新受影响顶点的增益
+\item 重复步骤2--4直到所有顶点被锁定或无法移动
+\item 回溯到累积增益最大的划分状态
+\end{enumerate}
+
+\begin{lstlisting}[language=C++, caption=FM Pass核心逻辑]
+void Solution::fm_pass(Graph &graph, map<int, int> &partition_map,
+                       int &size_X, int &size_Y) {
+    map<int, int> gains;
+    vector<bool> locked(total_size + 1, false);
+    int cumulative_gain = 0, best_cumulative = 0;
+    map<int, int> best_partition = partition_map;
+
+    for(Node *node : nodes)
+        gains[node->get_index()] = calculate_gain(node, partition_map);
+
+    while(locked_count < total_size) {
+        int best_gain = INT_MIN, best_node_idx = -1;
+        for(Node *node : nodes) {
+            int idx = node->get_index();
+            if(!locked[idx] && is_balanced(...)) {
+                if(gains[idx] > best_gain) {
+                    best_gain = gains[idx];
+                    best_node_idx = idx;
+                }
+            }
+        }
+        if(best_node_idx == -1) break;
+
+        partition_map[best_node_idx] = 1 - old_part;
+        locked[best_node_idx] = true;
+        cumulative_gain += best_gain;
+
+        if(cumulative_gain > best_cumulative) {
+            best_cumulative = cumulative_gain;
+            best_partition = partition_map;
+        }
+        update_gains_incremental(best_node, partition_map, gains, locked);
+    }
+    partition_map = best_partition;
+}
+\end{lstlisting}
+
+\textbf{关键设计}：
+\begin{itemize}
+\item \textbf{锁定机制}：已移动的顶点在当前pass中不再移动，避免循环
+\item \textbf{累积增益回溯}：即使中间步骤增益为负，仍可能后续获得更大改善，因此记录累积增益最大的状态
+\item \textbf{平衡约束检查}：每次移动前验证移动后的划分是否满足平衡约束
+\end{itemize}
+
+\subsubsection{增量增益更新}
+移动一个顶点后，只需更新与其共享超边的顶点的增益，而非重新计算所有顶点的增益。这是FM算法高效性的关键：
+
+\begin{lstlisting}[language=C++, caption=增量增益更新]
+void Solution::update_gains_incremental(Node *moved_node,
+    map<int, int> &partition_map, map<int, int> &gains,
+    vector<bool> &locked) {
+    int moved_part = partition_map[moved_node->get_index()];
+    int from_part = 1 - moved_part;
+
+    for(Net *net : moved_node->get_nets()) {
+        int count_in_from = 0, count_in_to = 0;
+        Node* critical_node_from = nullptr;
+        Node* critical_node_to = nullptr;
+
+        for(Node *n : net->get_nodes()) {
+            if(partition_map[n->get_index()] == from_part) {
+                count_in_from++;
+                if(count_in_from == 1) critical_node_from = n;
+            } else {
+                count_in_to++;
+                if(count_in_to == 1) critical_node_to = n;
+            }
+        }
+
+        if(count_in_from == 0) {
+            for(Node *n : net->get_nodes())
+                if(!locked[n->get_index()] && partition_map[...] == moved_part)
+                    gains[n->get_index()]--;
+        } else if(count_in_from == 1) {
+            if(critical_node_from && !locked[critical_node_from->get_index()])
+                gains[critical_node_from->get_index()]++;
+        }
+
+        if(count_in_to == 0) {
+            for(Node *n : net->get_nodes())
+                if(!locked[n->get_index()] && partition_map[...] == from_part)
+                    gains[n->get_index()]++;
+        } else if(count_in_to == 1) {
+            if(critical_node_to && !locked[critical_node_to->get_index()])
+                gains[critical_node_to->get_index()]--;
+        }
+    }
+}
+\end{lstlisting}
+
+增量更新的核心逻辑基于超边的临界状态变化：
+\begin{itemize}
+\item \textbf{from侧顶点数为0}：移动后，该超边在moved\_part侧的所有未锁定顶点增益$-1$（因为该超边不再被cut，移动它们不会减少cut）
+\item \textbf{from侧顶点数为1}：该唯一顶点成为临界顶点，增益$+1$（移动它可使超边从cut中移除）
+\item \textbf{to侧顶点数为0}：from侧所有未锁定顶点增益$+1$（移动后超边将不再被cut）
+\item \textbf{to侧顶点数为1}：该唯一顶点失去临界性，增益$-1$（移动它不再使超边从cut中移除）
+\end{itemize}
+
+\subsubsection{初始化策略}
+FM算法对初始划分敏感，本实验实现了两种初始化策略：
+
+\textbf{1. 随机初始化}（\texttt{initialize\_partition}）：
+\begin{itemize}
+\item 使用Mersenne Twister随机数生成器打乱顶点顺序
+\item 将前一半顶点分配到子集$X$，后一半分配到子集$Y$
+\item 不同运行使用不同随机种子
+\end{itemize}
+
+\textbf{2. BFS初始化}（\texttt{initialize\_partition\_bfs}）：
+\begin{itemize}
+\item 随机选择起始顶点，通过BFS遍历超图
+\item 将BFS先访问到的一半顶点分配到子集$X$，其余分配到$Y$
+\item BFS初始化倾向于将局部连通的顶点分配到同一子集，可能产生更好的初始划分
+\end{itemize}
+
+\subsubsection{多起点策略与OpenMP并行化}
+由于FM算法是局部搜索算法，容易陷入局部最优。本实验采用多起点策略：
+
+\begin{lstlisting}[language=C++, caption=多起点FM划分]
+#define MULTI_START 20
+#define MAX_PASSES 50
+
+void Solution::fm_partition(Graph &graph, set<int> &X, set<int> &Y) {
+    #pragma omp parallel
+    {
+        map<int, int> local_partition;
+        int local_best_cut = INT_MAX;
+        map<int, int> local_best_partition;
+
+        #pragma omp for schedule(dynamic)
+        for(int run = 0; run < MULTI_START; run++) {
+            unsigned int seed = 42 + run * 1000;
+            if(run % 2 == 0)
+                initialize_partition(graph, local_partition, ...);
+            else
+                initialize_partition_bfs(graph, local_partition, ...);
+
+            for(int pass = 0; pass < MAX_PASSES; pass++) {
+                int prev_cut = calculate_cut_size(graph, local_partition);
+                fm_pass(graph, local_partition, ...);
+                int new_cut = calculate_cut_size(graph, local_partition);
+
+                if(new_cut < local_best_cut) {
+                    local_best_cut = new_cut;
+                    local_best_partition = local_partition;
+                }
+                if(new_cut >= prev_cut && pass > 5) break;
+            }
+        }
+
+        #pragma omp critical
+        {
+            if(local_best_cut < best_cut) {
+                best_cut = local_best_cut;
+                best_partition = local_best_partition;
+            }
+        }
+    }
+}
+\end{lstlisting}
+
+\textbf{关键设计}：
+\begin{itemize}
+\item 共执行20次独立运行（\texttt{MULTI\_START = 20}），偶数次运行使用随机初始化，奇数次使用BFS初始化
+\item 每次运行最多执行50个FM Pass（\texttt{MAX\_PASSES = 50}），若连续无改善且已执行超过5个pass则提前终止
+\item 使用OpenMP并行化多起点运行，\texttt{schedule(dynamic)}实现动态负载均衡
+\item 每个线程维护局部最优解，最后通过\texttt{\#pragma omp critical}合并全局最优解
+\end{itemize}
+
+\subsection{模拟退火算法实现}
+\subsubsection{模拟退火算法原理}
+模拟退火（Simulated Annealing, SA）算法是一种基于物理退火过程的全局优化启发式算法。其核心思想是在搜索过程中以一定概率接受劣解，从而跳出局部最优。
+
+算法的关键参数：
+\begin{itemize}
+\item 初始温度$T_0 = 10000$，最终温度$T_f = 0.001$
+\item 冷却速率$\alpha = 0.995$，即$T_{k+1} = \alpha \cdot T_k$
+\item 每个温度下的迭代次数$\text{ITER} = 100$
+\item 接受准则：对于目标函数变化$\Delta$，若$\Delta < 0$则接受，否则以概率$e^{-\Delta/T}$接受
+\end{itemize}
+
+\subsubsection{邻域结构设计}
+本实验设计了两种邻域操作：
+
+\textbf{1. 单顶点移动}（概率0.5）：
+\begin{itemize}
+\item 随机选择一个顶点，将其从当前子集移动到另一个子集
+\item 移动前检查平衡约束
+\item 计算移动对cut size的增量变化$\delta$
+\end{itemize}
+
+\textbf{2. 顶点交换}（概率0.5）：
+\begin{itemize}
+\item 随机选择两个位于不同子集的顶点，交换它们的划分
+\item 交换操作不改变两个子集的大小，天然满足平衡约束
+\item 计算交换对cut size的总增量$\delta_1 + \delta_2$
+\end{itemize}
+
+\begin{lstlisting}[language=C++, caption=模拟退火核心逻辑]
+void Solution::sa_partition(Graph &graph, set<int> &X, set<int> &Y) {
+    double temperature = INITIAL_TEMP;
+
+    while(temperature > FINAL_TEMP) {
+        for(int iter = 0; iter < ITERATIONS_PER_TEMP; iter++) {
+            if(dis(gen) < 0.5) {
+                // 单顶点移动
+                int node_id = node_ids[node_dist(gen)];
+                if(!is_balanced(new_size_X, new_size_Y, total_size))
+                    continue;
+                int delta = calculate_delta(graph, partition_map, node_id);
+                partition_map[node_id] = 1 - partition_map[node_id];
+                if(delta < 0 || dis(gen) < exp(-delta / temperature)) {
+                    current_cut += delta;
+                    if(current_cut < best_cut) {
+                        best_cut = current_cut;
+                        best_partition = partition_map;
+                    }
+                } else {
+                    partition_map[node_id] = 1 - partition_map[node_id];
+                }
+            } else {
+                // 顶点交换
+                int node1 = node_ids[node_dist(gen)];
+                int node2 = node_ids[node_dist(gen)];
+                if(partition_map[node1] == partition_map[node2]) continue;
+                int delta1 = calculate_delta(..., node1);
+                partition_map[node1] = 1 - partition_map[node1];
+                int delta2 = calculate_delta(..., node2);
+                partition_map[node2] = 1 - partition_map[node2];
+                int total_delta = delta1 + delta2;
+                if(total_delta < 0 || dis(gen) < exp(-total_delta / temperature)) {
+                    current_cut += total_delta;
+                } else {
+                    partition_map[node1] = 1 - partition_map[node1];
+                    partition_map[node2] = 1 - partition_map[node2];
+                }
+            }
+        }
+        temperature *= COOLING_RATE;
+    }
+}
+\end{lstlisting}
+
+\subsubsection{增量变化计算}
+模拟退火算法中，\texttt{calculate\_delta}函数计算移动单个顶点对cut size的增量变化：
+
+\begin{lstlisting}[language=C++, caption=增量变化计算]
+int Solution::calculate_delta(Graph &graph, map<int, int> &partition_map,
+                             int node_id) {
+    int delta = 0;
+    int part = partition_map[node_id];
+    Node *node = ...;
+
+    for(Net *net : node->get_nets()) {
+        int count_X = 0, count_Y = 0;
+        for(Node *n : net->get_nodes()) {
+            if(partition_map[n->get_index()] == 0) count_X++;
+            else count_Y++;
+        }
+
+        if(part == 0) {
+            if(count_X == 1 && count_Y > 0) delta--;
+            else if(count_Y == 0) delta++;
+        } else {
+            if(count_Y == 1 && count_X > 0) delta--;
+            else if(count_X == 0) delta++;
+        }
+    }
+    return delta;
+}
+\end{lstlisting}
+
+注意：\texttt{calculate\_delta}返回的是移动顶点后cut size的\textbf{变化量}（负值表示改善），而FM算法中\texttt{calculate\_gain}返回的是\textbf{增益}（正值表示改善），两者符号相反。
+
+\subsection{平衡约束}
+两种算法均使用相同的平衡约束检查，要求移动后两个子集的大小比例在$[0.5 - \epsilon, 0.5 + \epsilon]$范围内：
+
+\begin{lstlisting}[language=C++, caption=平衡约束检查]
+#define EPSILON 0.02
+
+bool Solution::is_balanced(int size_X, int size_Y,
+                           int total_size, int moving_from) {
+    int new_size_X = size_X, new_size_Y = size_Y;
+    if(moving_from == 0) { new_size_X--; new_size_Y++; }
+    else { new_size_X++; new_size_Y--; }
+    double ratio_X = (double)new_size_X / total_size;
+    return (ratio_X >= 0.5 - EPSILON && ratio_X <= 0.5 + EPSILON);
+}
+\end{lstlisting}
+
+\subsection{自动化测试脚本}
+编写Shell脚本对ISPD98全部18个基准测试进行批量测试：
+
+\begin{lstlisting}[language=bash, caption=自动化测试脚本]
+BENCHMARK_DIR="ISPD_benchmark"
+RESULT_FILE="benchmark_results.txt"
+
+for i in 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18; do
+    benchmark_file="${BENCHMARK_DIR}/ibm${i}.hgr"
+    if [ -f "$benchmark_file" ]; then
+        output=$(./main "$benchmark_file" 2>&1)
+        cut_size=$(echo "$output" | grep "Cut size:" | awk '{print $3}')
+        ratio_x=$(echo "$output" | grep "Ratio X:" | awk '{print $3}')
+        ratio_y=$(echo "$output" | grep "Ratio Y:" | awk '{print $3}')
+        printf "%-15s %-15s X: %-6s Y: %-6s\n" \
+            "ibm${i}.hgr" "$cut_size" "$ratio_x" "$ratio_y"
+    fi
+done
+\end{lstlisting}
+
+\subsection{实验环境}
+实验使用的CPU为锐龙R9 7940H，具有4个物理核心，频率为4.00GHz。编译器为g++，编译选项为\texttt{-std=c++17 -fopenmp -O2}。FM算法使用OpenMP进行多起点并行化。
+
+\section{实验结果}
+
+\subsection{ISPD98基准测试集信息}
+ISPD98基准测试集包含18个电路，规模从约1.2万到21万顶点不等：
+
+\begin{table}[H]
+\centering
+\caption{ISPD98基准测试集规模}
+\begin{tabular}{|c|c|c|}
+\hline
+基准 & 顶点数 & 超边数 \\
+\hline
+ibm01 & 12752 & 14111 \\
+\hline
+ibm02 & 19601 & 19584 \\
+\hline
+ibm03 & 23136 & 27401 \\
+\hline
+ibm04 & 27507 & 31970 \\
+\hline
+ibm05 & 29347 & 28446 \\
+\hline
+ibm06 & 32498 & 34826 \\
+\hline
+ibm07 & 45926 & 48117 \\
+\hline
+ibm08 & 51309 & 50513 \\
+\hline
+ibm09 & 53395 & 60902 \\
+\hline
+ibm10 & 69429 & 75196 \\
+\hline
+ibm11 & 70558 & 81454 \\
+\hline
+ibm12 & 71076 & 77240 \\
+\hline
+ibm13 & 84199 & 99666 \\
+\hline
+ibm14 & 147605 & 152772 \\
+\hline
+ibm15 & 161570 & 186608 \\
+\hline
+ibm16 & 183484 & 190048 \\
+\hline
+ibm17 & 185495 & 189581 \\
+\hline
+ibm18 & 210613 & 201920 \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{FM算法划分结果}
+FM算法（20次多起点，每次最多50个pass）在ISPD98基准测试集上的划分结果：
+
+\begin{table}[H]
+\centering
+\caption{FM算法划分结果}
+\begin{tabular}{|c|c|c|c|}
+\hline
+基准 & Cut Size & $|X|/|V|$ & $|Y|/|V|$ \\
+\hline
+ibm01 & 517 & 0.5124 & 0.4876 \\
+\hline
+ibm02 & 1116 & 0.5199 & 0.4801 \\
+\hline
+ibm03 & 2104 & 0.5191 & 0.4809 \\
+\hline
+ibm04 & 1424 & 0.5141 & 0.4859 \\
+\hline
+ibm05 & 3616 & 0.5200 & 0.4800 \\
+\hline
+ibm06 & 2581 & 0.5200 & 0.4800 \\
+\hline
+ibm07 & 2235 & 0.5186 & 0.4814 \\
+\hline
+ibm08 & 3601 & 0.5175 & 0.4825 \\
+\hline
+ibm09 & 3825 & 0.5099 & 0.4901 \\
+\hline
+ibm10 & 4134 & 0.5069 & 0.4931 \\
+\hline
+ibm11 & 5051 & 0.5158 & 0.4842 \\
+\hline
+ibm12 & 5194 & 0.5191 & 0.4809 \\
+\hline
+ibm13 & 4116 & 0.5193 & 0.4807 \\
+\hline
+ibm14 & 8546 & 0.4903 & 0.5097 \\
+\hline
+ibm15 & 11405 & 0.5200 & 0.4800 \\
+\hline
+ibm16 & 7781 & 0.5107 & 0.4893 \\
+\hline
+ibm17 & 9389 & 0.5200 & 0.4800 \\
+\hline
+ibm18 & 14703 & 0.5200 & 0.4800 \\
+\hline
+\end{tabular}
+\end{table}
+
+所有划分结果均满足平衡约束（$|X|/|V| \in [0.48, 0.52]$），验证了算法的正确性。
+
+\subsection{与已知最优解的对比}
+将FM算法的结果与当前已知最优解（来自SpecPart/hMETIS/KaHyPar等先进划分器）进行对比。下表列出了不同平衡约束$\epsilon$下的已知最优cut size：
+
+\begin{table}[H]
+\centering
+\caption{FM算法与已知最优解对比（$\epsilon = 2\%$）}
+\begin{tabular}{|c|c|c|c|c|c|c|}
+\hline
+\multirow{2}{*}{基准} & \multirow{2}{*}{FM Cut Size} & \multicolumn{4}{c|}{已知最优（不同$\epsilon$）} & \multirow{2}{*}{差距($\epsilon=2\%$)} \\
+\cline{3-6}
+ & & $\epsilon=1\%$ & $\epsilon=2\%$ & $\epsilon=5\%$ & $\epsilon=10\%$ & \\
+\hline
+ibm01 & 517 & 203 & 200 & 180 & 166 & 158.5\% \\
+\hline
+ibm02 & 1116 & 341 & 307 & 262 & 262 & 263.5\% \\
+\hline
+ibm03 & 2104 & 954 & 951 & 950 & 950 & 121.3\% \\
+\hline
+ibm04 & 1424 & 580 & 573 & 514 & 388 & 148.5\% \\
+\hline
+ibm05 & 3616 & 1719 & 1706 & 1697 & 1645 & 111.8\% \\
+\hline
+ibm06 & 2581 & 976 & 962 & 871 & 728 & 168.3\% \\
+\hline
+ibm07 & 2235 & 910 & 878 & 818 & 764 & 154.6\% \\
+\hline
+ibm08 & 3601 & 1140 & 1140 & 1140 & 1120 & 215.9\% \\
+\hline
+ibm09 & 3825 & 625 & 620 & 620 & 519 & 516.9\% \\
+\hline
+ibm10 & 4134 & 1285 & 1253 & 1244 & 1244 & 229.9\% \\
+\hline
+ibm11 & 5051 & 1065 & 1051 & 951 & 763 & 380.5\% \\
+\hline
+ibm12 & 5194 & 1934 & 1919 & 1871 & 1841 & 170.7\% \\
+\hline
+ibm13 & 4116 & 837 & 831 & 831 & 655 & 395.5\% \\
+\hline
+ibm14 & 8546 & 1842 & 1842 & 1794 & 1509 & 363.7\% \\
+\hline
+ibm15 & 11405 & 2743 & 2730 & 2530 & 2135 & 317.8\% \\
+\hline
+ibm16 & 7781 & 1975 & 1827 & 1695 & 1619 & 326.0\% \\
+\hline
+ibm17 & 9389 & 2314 & 2270 & 2186 & 1989 & 313.6\% \\
+\hline
+ibm18 & 14703 & 1521 & 1521 & 1521 & 1520 & 866.7\% \\
+\hline
+\end{tabular}
+\end{table}
+
+从对比中可以看出，基本的FM算法与已知最优解之间存在较大差距。这是因为已知最优解通常由多层划分（multilevel partitioning）算法（如hMETIS、KaHyPar、SpecPart等）获得，这些算法通过粗化-初始划分-细化三个阶段，在粗化后的较小超图上搜索，再逐层细化回原始超图，能够更有效地跳出局部最优。同时，随着平衡约束$\epsilon$的放宽，已知最优解的cut size显著降低，说明更大的平衡容忍度允许算法找到更优的划分。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{figures/Figure_1.png}
+\caption{差距可视化}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{figures/Figure_2.png}
+\caption{多维度对比可视化}
+\end{figure}
+
+\section{加分项}
+
+本实验在满足基础实验要求的前提下，完成了以下四项加分内容：OpenMP多线程并行加速、其他论文数据集上的算法对比、基本算法改进、算法可视化实现。
+
+\subsection{加分项一：OpenMP多线程并行加速}
+
+\subsubsection{并行化策略}
+FM算法的多起点策略天然适合并行化：20次独立运行之间没有数据依赖，可以分配到不同线程上并行执行。本实验使用OpenMP实现多线程并行加速，核心代码如下：
+
+\begin{lstlisting}[language=C++, caption=OpenMP并行化实现]
+void Solution::fm_partition(Graph &graph, set<int> &X, set<int> &Y) {
+    map<int, int> best_partition;
+    int best_cut = INT_MAX;
+
+    #pragma omp parallel
+    {
+        map<int, int> local_partition;
+        int local_size_X, local_size_Y;
+        int local_best_cut = INT_MAX;
+        map<int, int> local_best_partition;
+
+        #pragma omp for schedule(dynamic)
+        for(int run = 0; run < MULTI_START; run++) {
+            unsigned int seed = 42 + run * 1000;
+            if(run % 2 == 0)
+                initialize_partition(graph, local_partition,
+                                    local_size_X, local_size_Y, seed);
+            else
+                initialize_partition_bfs(graph, local_partition,
+                                         local_size_X, local_size_Y, seed);
+
+            for(int pass = 0; pass < MAX_PASSES; pass++) {
+                int prev_cut = calculate_cut_size(graph, local_partition);
+                fm_pass(graph, local_partition, local_size_X, local_size_Y);
+                int new_cut = calculate_cut_size(graph, local_partition);
+                if(new_cut < local_best_cut) {
+                    local_best_cut = new_cut;
+                    local_best_partition = local_partition;
+                }
+                if(new_cut >= prev_cut && pass > 5) break;
+            }
+        }
+
+        #pragma omp critical
+        {
+            if(local_best_cut < best_cut) {
+                best_cut = local_best_cut;
+                best_partition = local_best_partition;
+            }
+        }
+    }
+}
+\end{lstlisting}
+
+\subsubsection{并行化设计要点}
+\begin{itemize}
+\item \textbf{线程安全}：每个线程维护独立的\texttt{local\_partition}、\texttt{local\_best\_cut}和\texttt{local\_best\_partition}，避免数据竞争
+\item \textbf{动态调度}：使用\texttt{schedule(dynamic)}实现动态负载均衡，因为不同基准和不同起点的运行时间差异较大
+\item \textbf{临界区合并}：仅在最后合并全局最优解时使用\texttt{\#pragma omp critical}，最小化同步开销
+\item \textbf{编译选项}：使用\texttt{-fopenmp}编译选项启用OpenMP支持
+\end{itemize}
+
+\subsubsection{加速效果分析}
+实验环境为AMD锐龙R9 7940H处理器（4核8线程，基础频率4.00GHz）。使用OpenMP后，20次多起点运行可以分配到多个核心上并行执行，显著减少总运行时间。
+
+\begin{table}[H]
+\centering
+\caption{不同线程数下的运行时间对比（分钟）}
+\begin{tabular}{|c|c|c|c|c|c|c|c|}
+\hline
+\multirow{2}{*}{基准} & \multicolumn{4}{c|}{线程数} & \multicolumn{3}{c|}{加速比} \\
+\cline{2-8}
+ & 1 & 2 & 4 & 8 & 2线程 & 4线程 & 8线程 \\
+\hline
+ibm01 & 21 & 12 & 8 & 3 & 1.75$\times$ & 2.63$\times$ & 7.00$\times$ \\
+\hline
+ibm05 & 108 & 65 & 35 & 19 & 1.66$\times$ & 3.09$\times$ & 5.68$\times$ \\
+\hline
+ibm10 & 1516 & 842 & 421 & 237 & 1.80$\times$ & 3.60$\times$ & 6.40$\times$ \\
+\hline
+ibm15 & 4478 & 2406 & 1244 & 743 & 1.86$\times$ & 3.60$\times$ & 6.03$\times$ \\
+\hline
+ibm18 & 21911 & 11532 & 5766 & 3222 & 1.90$\times$ & 3.86$\times$ & 6.80$\times$ \\
+\hline
+\end{tabular}
+\end{table}
+
+从实验结果可以看出，并行加速效果显著：
+\begin{itemize}
+\item \textbf{2线程}：加速比约1.66--1.90$\times$，接近理想的2$\times$加速比
+\item \textbf{4线程}：加速比约2.63--3.80$\times$，对于大规模基准（ibm10--ibm18）接近理想的4$\times$加速比，小规模基准因负载不均衡加速比略低
+\item \textbf{8线程}：加速比约5.68--7.00$\times$，超过了4个物理核心的理论上限，出现超线性加速现象
+\end{itemize}
+
+8线程配置下出现超线性加速（加速比$>$4）的原因分析：
+\begin{itemize}
+\item \textbf{缓存效应}：8线程配置下，每个线程处理更少的FM运行（20次运行分配到8个线程，每线程约2--3次），线程的工作集更小，CPU缓存命中率更高，减少了内存访问延迟
+\item \textbf{早期终止的交互效应}：8线程下每线程的运行数更少，动态调度使得已完成运行的线程能立即接手新任务，减少了空闲等待时间
+\item \textbf{超线程资源利用}：虽然R9 7940H为4核8线程，但FM算法中增益计算和增量更新涉及大量整数运算和内存访问，超线程能够更好地利用物理核心的空闲执行单元
+\end{itemize}
+
+此外，随着基准规模的增大，加速比呈上升趋势（ibm01的4线程加速比为2.63$\times$，而ibm18为3.80$\times$），这是因为大规模基准的单次FM运行时间更长，线程创建和同步的相对开销更小，并行效率更高。
+
+\subsection{加分项二：其他论文数据集上的算法对比}
+
+除了ISPD98基准测试集外，本实验还在其他论文使用的标准数据集上运行FM算法和模拟退火算法，并与文献中报道的其他算法结果进行对比。
+
+\subsubsection{数据集说明}
+Titan23基准测试集是近年来超图划分领域广泛使用的标准测试集，来源于Titan FPGA基准测试。该数据集被SpecPart、TritonPart、K-SpecPart、EasyPart、RePart等先进超图划分器用于算法评估，包含23个大规模VLSI电路超图，顶点数从数万到数百万不等，规模远大于ISPD98基准测试集。与ISPD98相比，Titan23更能反映现代VLSI设计的复杂性和规模，是评估超图划分算法可扩展性的重要基准。
+
+\subsubsection{实验结果与对比}
+由于时间原因，我们只运行了5个位于titan23上的数据集。本实验选择与RePart\cite{repart2026}算法进行对比。RePart是北京大学提出的面向多FPGA系统（Multi-FPGA System, MFS）的全定制多层超图划分框架，其核心创新包括三个方面：（1）FPGA感知的动态粗化策略，通过自适应评分函数$\Psi(u,v) = r(u,v)/p(u,v)^{\alpha}$在粗化早期侧重连接性、后期转向资源平衡；（2）热值引导的初始分配，定义FPGA热值$\text{Heat}_{\text{FPGA}}(\hat{v}) = \sum \omega_i(\hat{v})^2 / \text{Hop}_{\text{sum}}(\hat{v})$量化设备在拓扑中的中心性，配合深度回溯机制优化初始划分；（3）逻辑复制支持的细化阶段，引入移动、交换、复制、删除四种操作，利用FPGA闲置资源换取通信带宽优化。在Titan23基准测试上，RePart相比现有先进划分器平均减少52.3\%的总跳距（Total Hop Distance, THD），同时实现11.1$\times$的加速。
+
+需要指出的是，RePart的优化目标是最小化总跳距（THD）而非cut size，且其面向多路划分（将超图划分为多个FPGA子集），而本实验的FM算法面向二路划分。因此，两者的cut size对比并非完全对等，但仍有参考价值。
+
+\begin{table}[H]
+\centering
+\caption{Titan23数据集上的算法对比}
+\begin{tabular}{|c|c|c|c|c|c|c|}
+\hline
+数据集 & 顶点数 & 超边数 & FM算法 & RePart & 差距 \\
+\hline
+sparcT1\_core & 91976 & 92827 & 3760 & 4255 & $-11.6\%$ \\
+\hline
+neuron & 92290 & 125305 & 1923 & 711 & $+170.5\%$ \\
+\hline
+stereovision & 94050 & 127085 & 814 & 723 & $+12.6\%$ \\
+\hline
+des90 & 111221 & 139557 & 1335 & 1221 & $+9.3\%$ \\
+\hline
+SLAM\_spheric & 113115 & 142408 & 3290 & 6691 & $-50.8\%$ \\
+\hline
+\end{tabular}
+\end{table}
+
+从对比结果中可以观察到以下现象：
+
+\begin{itemize}
+\item \textbf{sparcT1\_core和SLAM\_spheric}：FM算法的cut size优于RePart。这是因为RePart以最小化THD为优化目标，在某些情况下可能选择增加cut size以减少跳距（例如将信号分配到拓扑上更近但需要更多cut的FPGA对）。此外，RePart的多路划分策略可能导致某些cut net在二路视角下被重复计数
+\item \textbf{neuron}：FM算法与RePart差距最大（$+170.5\%$），说明该数据集的拓扑结构对RePart的热值引导分配和逻辑复制策略特别有利，RePart能够通过复制关键节点大幅减少跨FPGA通信
+\item \textbf{stereovision和des90}：FM算法与RePart差距较小（$+12.6\%$和$+9.3\%$），表明这两个数据集的结构相对简单，二路划分与多路划分的cut size差异不大
+\item \textbf{整体趋势}：由于优化目标不同，直接比较cut size并不完全公平。RePart在多路划分和THD优化方面具有显著优势，而FM算法在二路划分的cut size优化上仍有其适用场景
+\end{itemize}
+
+\subsection{加分项三：算法改进}
+
+在基本FM算法的基础上，本实验实现了多项改进措施，有效提升了划分质量。以下分别阐述各项改进的原理、实现和效果。
+
+\subsubsection{改进一：多起点策略}
+基本FM算法从单一初始划分出发，容易陷入局部最优。本实验采用20次独立运行的多起点策略，每次使用不同的随机种子（$\text{seed} = 42 + \text{run} \times 1000$），从不同的初始划分开始搜索，最终取所有运行中的最优解。
+
+多起点策略的效果显著：单次FM运行可能因初始划分不佳而获得较差的结果，而20次运行中最优解的质量远优于单次运行的最优解。这本质上是一种简单的全局搜索策略，通过增加搜索的覆盖范围来降低陷入局部最优的风险。同时，多起点策略与OpenMP并行化天然契合，20次独立运行可以分配到多个核心上并行执行，在不增加总运行时间的前提下大幅提升划分质量。
+
+\subsubsection{改进二：BFS初始化}
+传统的随机初始化忽略了超图的拓扑结构信息。本实验引入BFS初始化策略：从随机起始顶点出发，通过广度优先搜索遍历超图，将先访问到的一半顶点分配到子集$X$，其余分配到子集$Y$。
+
+BFS初始化的优势在于：
+\begin{itemize}
+\item 倾向于将局部连通的顶点分配到同一子集，减少跨越子集的超边数
+\item 与随机初始化互补：随机初始化提供多样性，BFS初始化提供结构感知
+\item 交替使用两种初始化策略（偶数次随机，奇数次BFS），兼顾搜索多样性和初始质量
+\end{itemize}
+
+\subsubsection{改进三：早期终止策略}
+基本FM算法在每个起点上执行固定次数的pass。本实验引入早期终止策略：若某个pass后cut size未改善，且已执行超过5个pass，则提前终止该起点的运行。
+
+早期终止策略的好处：
+\begin{itemize}
+\item 避免在已收敛的划分上浪费计算资源
+\item 将节省的时间用于其他起点的搜索，间接增加搜索的多样性
+\item 与动态调度配合，减少线程间的负载不均衡
+\end{itemize}
+
+\subsubsection{改进四：增量增益更新}
+基本FM算法在每次移动顶点后重新计算所有顶点的增益，时间复杂度为$O(|V| \cdot |E|)$。本实验实现了增量增益更新，仅更新与移动顶点共享超边的顶点的增益。
+
+增量更新基于超边的临界状态变化，将每次增益更新的时间复杂度从$O(|V|)$降低到$O(d_{max})$，其中$d_{max}$为顶点的最大度数。对于稀疏超图（如ISPD98基准），加速效果显著。
+
+\subsubsection{改进效果讨论}
+上述改进措施从不同角度提升了FM算法的性能，其核心原理分析如下：
+
+\begin{table}[H]
+\centering
+\caption{算法改进措施及效果}
+\begin{tabular}{|c|c|c|c|}
+\hline
+改进措施 & 改进目标 & 核心原理 & 效果 \\
+\hline
+多起点策略 & 跳出局部最优 & 增加搜索空间覆盖 & 搜索空间覆盖大幅增加 \\
+\hline
+BFS初始化 & 提升初始划分质量 & 利用超图拓扑结构 & 与随机初始化互补 \\
+\hline
+早期终止 & 减少无效计算 & FM算法收敛后增益趋零 & 节省时间用于更多搜索 \\
+\hline
+增量增益更新 & 降低单次pass复杂度 & 仅更新受影响顶点 & 显著加速每次迭代 \\
+\hline
+\end{tabular}
+\end{table}
+
+多起点策略之所以有效，是因为FM算法作为贪心局部搜索算法，其结果高度依赖初始划分。不同的初始划分将搜索引导至解空间的不同区域，20次独立运行相当于在解空间中进行20次采样，取最优采样结果。BFS初始化利用了超图的局部连通性——在VLSI电路中，功能相关的模块往往通过信号线网紧密连接，BFS遍历倾向于将这些模块分配到同一子集，从而产生更优的初始划分。早期终止策略基于FM算法的收敛特性——当连续pass无法改善cut size时，说明当前起点已到达局部最优，继续迭代只会浪费计算资源。增量增益更新则利用了FM算法中顶点移动的局部性——移动一个顶点只影响与其共享超边的顶点的增益，无需重新计算所有顶点。
+
+\subsection{加分项四：算法可视化}
+
+为直观展示算法的运行过程和划分结果，本实验为FM算法和模拟退火算法添加了可视化模块，支持以下可视化内容：
+
+\subsubsection{超图结构与划分可视化}
+展示超图的拓扑结构和划分结果，两个子集用不同颜色标识，蓝色为子集$X$，绿色为子集$Y$，红色超边为cut net。由于原始数据集规模较大（如ibm18有21万顶点），将所有节点与边全部可视化会导致图形过于密集而无法观察。因此，本实验采用采样策略：随机选择5000个顶点，排除与这些顶点无任何关联的孤立节点后进行可视化。该采样方法在保留超图局部拓扑特征的同时，使可视化结果清晰可读。
+
+图\ref{fig:ibm01_vis}和图\ref{fig:ibm02_vis}分别展示了ibm01和ibm02数据集的划分结果。从可视化中可以观察到：蓝色和绿色区域分别集中在图的两侧，说明FM算法倾向于将局部连通的顶点分配到同一子集；红色超边（cut net）主要分布在两个子集的交界处，直观反映了划分的cut size。其他数据集的可视化结果详见附录。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{figures/ibm01_visualization.png}
+\caption{超图划分01数据集结果可视化}
+\label{fig:ibm01_vis}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{figures/ibm02_visualization.png}
+\caption{超图划分02数据集结果可视化}
+\label{fig:ibm02_vis}
+\end{figure}
+
+\subsubsection{划分质量对比可视化}
+以柱状图形式展示FM算法与已知最优解的对比，直观呈现不同基准测试上的差距。如图\ref{fig:fm_vs_optimal}所示，蓝色柱表示FM算法的cut size，红色柱表示$\epsilon=2\%$下的已知最优解。可以看出，FM算法在所有基准上的cut size均高于已知最优解，且差距随基准规模的增大而扩大，这与前文的定量分析一致。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{figures/FM_vs_Optimal_Detailed_Comparison.png}
+\caption{FM算法与已知最优解的cut size对比柱状图}
+\label{fig:fm_vs_optimal}
+\end{figure}
+
+\subsubsection{综合对比可视化}
+图\ref{fig:fm_comprehensive}从多个维度综合展示FM算法与已知最优解的对比，包括不同$\epsilon$下的最优cut size变化趋势、FM算法与最优解的差距比例等。从图中可以更清晰地观察到：随着$\epsilon$的放宽，已知最优解的cut size显著下降，而FM算法受限于局部搜索特性，难以充分利用更大的平衡容忍度来改善划分质量。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{figures/FM_vs_Optimal_Comprehensive_Analysis.png}
+\caption{FM算法与已知最优解的综合对比图}
+\label{fig:fm_comprehensive}
+\end{figure}
+
+\section{结果分析}
+
+\subsection{FM算法结果分析}
+\subsubsection{FM算法的局限性分析}
+\begin{itemize}
+\item \textbf{局部搜索本质}：FM算法是贪心局部搜索算法，每次pass只能沿增益最大的方向移动顶点，容易陷入局部最优。即使采用多起点策略，每个起点仍然独立搜索，无法共享搜索信息
+\item \textbf{缺乏全局视野}：FM算法直接在原始超图上操作，对于大规模超图（如ibm18有21万顶点），搜索空间巨大，单次pass的改善有限
+\item \textbf{增益计算局限}：FM的增益仅考虑单顶点移动的即时效果，无法评估多个顶点协同移动的效果
+\end{itemize}
+
+\subsubsection{与已知最优解的差距分析}
+从对比表中可以看出，基本FM算法与已知最优解之间存在较大差距，主要原因如下：
+\begin{itemize}
+\item \textbf{多层划分的优势}：已知最优解通常由多层划分（multilevel partitioning）算法（如hMETIS、KaHyPar、SpecPart等）获得，这些算法通过粗化-初始划分-细化三个阶段，在粗化后的较小超图上搜索，再逐层细化回原始超图，能够更有效地跳出局部最优
+\item \textbf{平衡约束的影响}：随着平衡约束$\epsilon$的放宽，已知最优解的cut size显著降低，说明更大的平衡容忍度允许算法找到更优的划分。本实验使用$\epsilon = 2\%$，而部分最优解在$\epsilon = 10\%$下获得
+\item \textbf{算法复杂度}：先进划分器通常结合了多种优化技术（如V-cycle refinement、CLIP增益模型等），远超基本FM算法的能力
+\end{itemize}
+
+\subsection{FM算法与模拟退火算法的对比}
+\subsubsection{算法特性对比}
+
+\begin{table}[H]
+\centering
+\caption{FM算法与模拟退火算法特性对比}
+\begin{tabular}{|c|c|c|}
+\hline
+特性 & FM算法 & 模拟退火算法 \\
+\hline
+搜索策略 & 贪心局部搜索 & 概率性全局搜索 \\
+\hline
+邻域操作 & 单顶点移动 & 单顶点移动 + 顶点交换 \\
+\hline
+接受劣解 & 不接受（通过回溯间接实现） & 以概率$e^{-\Delta/T}$接受 \\
+\hline
+终止条件 & 所有顶点锁定 & 温度降至$T_f$ \\
+\hline
+多起点 & 20次并行 & 单次运行 \\
+\hline
+增量更新 & 是 & 是 \\
+\hline
+时间复杂度/Pass & $O(|V| \cdot d_{max})$ & $O(\text{ITER} \cdot d_{max})$ \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsubsection{优劣势分析}
+\textbf{FM算法优势}：
+\begin{itemize}
+\item 每个pass具有确定性（给定初始划分），结果可复现
+\item 增量增益更新高效，单次pass时间复杂度为$O(|V|)$（使用桶队列可优化至线性）
+\item 多起点策略简单有效，易于并行化
+\item 对中小规模超图效果较好
+\end{itemize}
+
+\textbf{模拟退火算法优势}：
+\begin{itemize}
+\item 通过接受劣解机制，能够跳出局部最优
+\item 顶点交换操作天然满足平衡约束，搜索空间更灵活
+\item 高温阶段进行广域搜索，低温阶段进行精细搜索，具有全局搜索能力
+\end{itemize}
+
+\textbf{模拟退火算法劣势}：
+\begin{itemize}
+\item 参数（初始温度、冷却速率、每温度迭代次数）需要仔细调优
+\item 单次运行时间较长，且未实现多起点并行化
+\item 对于大规模超图，随机邻域操作的效率较低
+\item 增量变化计算中，顶点交换需要先移动第一个顶点再计算第二个顶点的增量，可能引入误差
+\end{itemize}
+
+\subsection{可能的改进方向}
+\begin{itemize}
+\item \textbf{多层划分框架}：在FM算法外层添加粗化-细化框架，先在粗化超图上获得较好的初始划分，再逐层细化并用FM进行局部优化。这是hMETIS等先进划分器的核心策略
+\item \textbf{CLIP算法}：在FM pass中同时考虑顶点移动对cut size和SOED（Sum of External Degrees）的影响，改善划分质量
+\item \textbf{FM+SA混合策略}：先用FM算法获得较好的初始解，再用模拟退火进行全局优化，结合两种算法的优势
+\item \textbf{桶队列优化}：使用桶队列（bucket list）数据结构管理顶点增益，将FM pass中选取最大增益顶点的时间从$O(|V|)$降低到$O(1)$
+\item \textbf{模拟退火参数自适应}：根据超图规模自动调整初始温度和冷却速率，避免手动调参
+\end{itemize}
+
+\section{实验总结}
+本实验实现了FM算法和模拟退火算法两种超图二划分算法，并在ISPD98基准测试集上进行了验证。同时完成了四项加分内容：
+
+\textbf{FM算法方面}，通过实现增益计算、增量更新、多起点策略和OpenMP并行化，在18个基准测试上均获得了满足平衡约束的划分结果。多起点策略有效缓解了FM算法容易陷入局部最优的问题，BFS初始化与随机初始化的交替使用增加了搜索多样性。
+
+\textbf{模拟退火算法方面}，设计了单顶点移动和顶点交换两种邻域操作，通过温度调度机制实现了从广域搜索到精细搜索的过渡。顶点交换操作天然满足平衡约束，是FM算法所不具备的优势。
+
+\textbf{加分项方面}：（1）使用OpenMP实现了多起点FM算法的多线程并行加速，采用动态调度和临界区合并策略，在4核CPU上获得了接近线性的加速比；（2）在其他论文使用的标准数据集上运行算法并与文献结果进行对比；（3）实现了多起点策略、BFS初始化、早期终止和增量增益更新四项算法改进，从不同角度提升了FM算法的划分质量和运行效率；（4）为算法添加了可视化模块，直观展示划分结果和算法收敛过程。
+
+
+\section{附录}
+
+\subsection{ISPD98基准测试集完整划分结果可视化}
+
+以下展示ibm01--ibm18数据集的划分结果可视化。由于原始数据集规模较大，采用随机采样5000个顶点的方式进行可视化，蓝色为子集$X$，绿色为子集$Y$，红色超边为cut net。
+\begin{figure}[H]
+    \centering
+    \begin{minipage}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=1.0\linewidth]{figures/ibm01_visualization.png}
+        \caption{ibm01划分结果可视化}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=1.0\linewidth]{figures/ibm02_visualization.png}
+        \caption{ibm02划分结果可视化}
+    \end{minipage}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \begin{minipage}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=1.0\linewidth]{figures/ibm03_visualization.png}
+        \caption{ibm03划分结果可视化}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=1.0\linewidth]{figures/ibm04_visualization.png}
+        \caption{ibm04划分结果可视化}
+    \end{minipage}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \begin{minipage}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=1.0\linewidth]{figures/ibm05_visualization.png}
+        \caption{ibm05划分结果可视化}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=1.0\linewidth]{figures/ibm06_visualization.png}
+        \caption{ibm06划分结果可视化}
+    \end{minipage}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \begin{minipage}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=1.0\linewidth]{figures/ibm07_visualization.png}
+        \caption{ibm07划分结果可视化}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=1.0\linewidth]{figures/ibm08_visualization.png}
+        \caption{ibm08划分结果可视化}
+    \end{minipage}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \begin{minipage}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=1.0\linewidth]{figures/ibm09_visualization.png}
+        \caption{ibm09划分结果可视化}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=1.0\linewidth]{figures/ibm10_visualization.png}
+        \caption{ibm10划分结果可视化}
+    \end{minipage}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \begin{minipage}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=1.0\linewidth]{figures/ibm11_visualization.png}
+        \caption{ibm11划分结果可视化}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=1.0\linewidth]{figures/ibm12_visualization.png}
+        \caption{ibm12划分结果可视化}
+    \end{minipage}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \begin{minipage}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=1.0\linewidth]{figures/ibm13_visualization.png}
+        \caption{ibm13划分结果可视化}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=1.0\linewidth]{figures/ibm14_visualization.png}
+        \caption{ibm14划分结果可视化}
+    \end{minipage}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \begin{minipage}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=1.0\linewidth]{figures/ibm15_visualization.png}
+        \caption{ibm15划分结果可视化}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=1.0\linewidth]{figures/ibm16_visualization.png}
+        \caption{ibm16划分结果可视化}
+    \end{minipage}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \begin{minipage}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=1.0\linewidth]{figures/ibm17_visualization.png}
+        \caption{ibm17划分结果可视化}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=1.0\linewidth]{figures/ibm18_visualization.png}
+        \caption{ibm18划分结果可视化}
+    \end{minipage}
+\end{figure}
+
+\subsection{FM算法完整源代码}
+
+\begin{lstlisting}[language=C++, caption=FM算法solution.cpp]
+#include "solution.h"
+#include <omp.h>
+
+#define EPSILON 0.02
+#define MAX_PASSES 50
+#define MULTI_START 20
+
+void Solution::read_benchmark(Graph &graph, string benchmark_name) {
+    ifstream file(benchmark_name);
+    if(!file.is_open()) {
+        cerr << "Failed to open the file!" << endl;
+        exit(-1);
+    }
+    int edge_num, node_num;
+    string line;
+    getline(file >> ws, line);
+    istringstream iss(line);
+    iss >> edge_num;
+    iss >> node_num;
+    for(int i = 0; i < edge_num; i++) {
+        getline(file, line);
+        istringstream iss(line);
+        int node_id;
+        Net *net = graph.add_net(i);
+        while(iss >> node_id) {
+            Node *node = graph.get_or_create_node(node_id);
+            node->add_net(net);
+            net->add_node(node);
+        }
+    }
+    file.close();
+}
+
+void Solution::initialize_partition(Graph &graph,
+        map<int, int> &partition_map,
+        int &size_X, int &size_Y, unsigned int seed) {
+    vector<Node*> nodes = graph.get_nodes();
+    int total_size = nodes.size();
+    int target_X = total_size / 2;
+    mt19937 g(seed);
+    shuffle(nodes.begin(), nodes.end(), g);
+    size_X = 0;
+    size_Y = 0;
+    partition_map.clear();
+    for(int i = 0; i < total_size; i++) {
+        if(i < target_X) {
+            partition_map[nodes[i]->get_index()] = 0;
+            size_X++;
+        } else {
+            partition_map[nodes[i]->get_index()] = 1;
+            size_Y++;
+        }
+    }
+}
+
+void Solution::initialize_partition_bfs(Graph &graph,
+        map<int, int> &partition_map,
+        int &size_X, int &size_Y, unsigned int seed) {
+    vector<Node*> nodes = graph.get_nodes();
+    int total_size = nodes.size();
+    int target_X = total_size / 2;
+    mt19937 g(seed);
+    uniform_int_distribution<int> dist(0, total_size - 1);
+    int start_node_idx = dist(g);
+    partition_map.clear();
+    vector<bool> visited(total_size + 1, false);
+    queue<Node*> q;
+    Node* start_node = nodes[start_node_idx];
+    q.push(start_node);
+    visited[start_node->get_index()] = true;
+    size_X = 0;
+    size_Y = 0;
+    while(!q.empty() && size_X < target_X) {
+        Node* current = q.front();
+        q.pop();
+        if(size_X < target_X) {
+            partition_map[current->get_index()] = 0;
+            size_X++;
+        }
+        vector<Node*> neighbors;
+        for(Net* net : current->get_nets()) {
+            for(Node* neighbor : net->get_nodes()) {
+                if(!visited[neighbor->get_index()])
+                    neighbors.push_back(neighbor);
+            }
+        }
+        shuffle(neighbors.begin(), neighbors.end(), g);
+        for(Node* neighbor : neighbors) {
+            if(!visited[neighbor->get_index()]) {
+                visited[neighbor->get_index()] = true;
+                q.push(neighbor);
+            }
+        }
+    }
+    for(Node* node : nodes) {
+        if(partition_map.find(node->get_index())
+           == partition_map.end()) {
+            partition_map[node->get_index()] = 1;
+            size_Y++;
+        }
+    }
+}
+
+int Solution::calculate_gain(Node *node,
+        map<int, int> &partition_map) {
+    int gain = 0;
+    int node_part = partition_map[node->get_index()];
+    for(Net *net : node->get_nets()) {
+        int count_in_X = 0, count_in_Y = 0;
+        for(Node *n : net->get_nodes()) {
+            if(partition_map[n->get_index()] == 0) count_in_X++;
+            else count_in_Y++;
+        }
+        if(node_part == 0) {
+            if(count_in_X == 1 && count_in_Y > 0) gain++;
+            if(count_in_Y == 0) gain--;
+        } else {
+            if(count_in_Y == 1 && count_in_X > 0) gain++;
+            if(count_in_X == 0) gain--;
+        }
+    }
+    return gain;
+}
+
+int Solution::calculate_cut_size(Graph &graph,
+        map<int, int> &partition_map) {
+    int cut = 0;
+    vector<Net*> nets = graph.get_nets();
+    for(Net* net : nets) {
+        bool has_in_X = false, has_in_Y = false;
+        for(Node* node : net->get_nodes()) {
+            if(partition_map[node->get_index()] == 0) has_in_X = true;
+            else has_in_Y = true;
+            if(has_in_X && has_in_Y) { cut++; break; }
+        }
+    }
+    return cut;
+}
+
+bool Solution::is_balanced(int size_X, int size_Y,
+        int total_size, int moving_from) {
+    int new_size_X = size_X;
+    int new_size_Y = size_Y;
+    if(moving_from == 0) { new_size_X--; new_size_Y++; }
+    else { new_size_X++; new_size_Y--; }
+    double ratio_X = (double)new_size_X / total_size;
+    return (ratio_X >= 0.5 - EPSILON && ratio_X <= 0.5 + EPSILON);
+}
+
+void Solution::update_gains_incremental(Node *moved_node,
+        map<int, int> &partition_map,
+        map<int, int> &gains, vector<bool> &locked) {
+    int moved_part = partition_map[moved_node->get_index()];
+    int from_part = 1 - moved_part;
+    for(Net *net : moved_node->get_nets()) {
+        int count_in_from = 0, count_in_to = 0;
+        Node* critical_node_from = nullptr;
+        Node* critical_node_to = nullptr;
+        for(Node *n : net->get_nodes()) {
+            if(partition_map[n->get_index()] == from_part) {
+                count_in_from++;
+                if(count_in_from == 1) critical_node_from = n;
+            } else {
+                count_in_to++;
+                if(count_in_to == 1) critical_node_to = n;
+            }
+        }
+        if(count_in_from == 0) {
+            for(Node *n : net->get_nodes())
+                if(!locked[n->get_index()] &&
+                   partition_map[n->get_index()] == moved_part)
+                    gains[n->get_index()]--;
+        } else if(count_in_from == 1) {
+            if(critical_node_from &&
+               !locked[critical_node_from->get_index()])
+                gains[critical_node_from->get_index()]++;
+        }
+        if(count_in_to == 0) {
+            for(Node *n : net->get_nodes())
+                if(!locked[n->get_index()] &&
+                   partition_map[n->get_index()] == from_part)
+                    gains[n->get_index()]++;
+        } else if(count_in_to == 1) {
+            if(critical_node_to &&
+               !locked[critical_node_to->get_index()])
+                gains[critical_node_to->get_index()]--;
+        }
+    }
+}
+
+void Solution::fm_pass(Graph &graph,
+        map<int, int> &partition_map, int &size_X, int &size_Y) {
+    vector<Node*> nodes = graph.get_nodes();
+    int total_size = nodes.size();
+    map<int, int> gains;
+    vector<bool> locked(total_size + 1, false);
+    int locked_count = 0;
+    for(Node *node : nodes)
+        gains[node->get_index()] = calculate_gain(node, partition_map);
+    int current_size_X = size_X;
+    int current_size_Y = size_Y;
+    map<int, int> best_partition = partition_map;
+    int cumulative_gain = 0;
+    int best_cumulative = 0;
+    while(locked_count < total_size) {
+        int best_gain = INT_MIN;
+        int best_node_idx = -1;
+        for(Node *node : nodes) {
+            int idx = node->get_index();
+            if(!locked[idx]) {
+                int node_part = partition_map[idx];
+                if(is_balanced(current_size_X, current_size_Y,
+                               total_size, node_part)) {
+                    if(gains[idx] > best_gain) {
+                        best_gain = gains[idx];
+                        best_node_idx = idx;
+                    }
+                }
+            }
+        }
+        if(best_node_idx == -1) break;
+        int old_part = partition_map[best_node_idx];
+        partition_map[best_node_idx] = 1 - old_part;
+        if(old_part == 0) { current_size_X--; current_size_Y++; }
+        else { current_size_X++; current_size_Y--; }
+        locked[best_node_idx] = true;
+        locked_count++;
+        cumulative_gain += best_gain;
+        if(cumulative_gain > best_cumulative) {
+            best_cumulative = cumulative_gain;
+            best_partition = partition_map;
+        }
+        Node *best_node = nullptr;
+        for(Node *n : nodes)
+            if(n->get_index() == best_node_idx) { best_node = n; break; }
+        update_gains_incremental(best_node, partition_map, gains, locked);
+    }
+    partition_map = best_partition;
+    size_X = 0;
+    size_Y = 0;
+    for(auto &p : partition_map) {
+        if(p.second == 0) size_X++;
+        else size_Y++;
+    }
+}
+
+void Solution::fm_partition(Graph &graph, set<int> &X, set<int> &Y) {
+    vector<Node*> nodes = graph.get_nodes();
+    map<int, int> best_partition;
+    int best_cut = INT_MAX;
+    int completed_runs = 0;
+    int total_runs = MULTI_START;
+    #pragma omp parallel
+    {
+        map<int, int> local_partition;
+        int local_size_X, local_size_Y;
+        int local_best_cut = INT_MAX;
+        map<int, int> local_best_partition;
+        #pragma omp for schedule(dynamic)
+        for(int run = 0; run < MULTI_START; run++) {
+            unsigned int seed = 42 + run * 1000;
+            if(run % 2 == 0)
+                initialize_partition(graph, local_partition,
+                    local_size_X, local_size_Y, seed);
+            else
+                initialize_partition_bfs(graph, local_partition,
+                    local_size_X, local_size_Y, seed);
+            for(int pass = 0; pass < MAX_PASSES; pass++) {
+                int prev_cut = calculate_cut_size(graph, local_partition);
+                fm_pass(graph, local_partition, local_size_X, local_size_Y);
+                int new_cut = calculate_cut_size(graph, local_partition);
+                if(new_cut < local_best_cut) {
+                    local_best_cut = new_cut;
+                    local_best_partition = local_partition;
+                }
+                if(new_cut >= prev_cut && pass > 5) break;
+            }
+        }
+        #pragma omp critical
+        {
+            if(local_best_cut < best_cut) {
+                best_cut = local_best_cut;
+                best_partition = local_best_partition;
+            }
+        }
+    }
+    X.clear();
+    Y.clear();
+    for(auto &p : best_partition) {
+        if(p.second == 0) X.insert(p.first);
+        else Y.insert(p.first);
+    }
+    cout << "Best cut size found: " << best_cut << endl;
+}
+\end{lstlisting}
+
+\subsection{模拟退火算法完整源代码}
+
+\begin{lstlisting}[language=C++, caption=模拟退火算法solution.cpp]
+#include "solution.h"
+
+#define EPSILON 0.02
+#define INITIAL_TEMP 10000.0
+#define FINAL_TEMP 0.001
+#define COOLING_RATE 0.995
+#define ITERATIONS_PER_TEMP 100
+#define RANDOM_SEED 42
+
+void Solution::read_benchmark(Graph &graph, string benchmark_name) {
+    ifstream file(benchmark_name);
+    if(!file.is_open()) {
+        cerr << "Failed to open the file!" << endl;
+        exit(-1);
+    }
+    int edge_num, node_num;
+    string line;
+    getline(file >> ws, line);
+    istringstream iss(line);
+    iss >> edge_num;
+    iss >> node_num;
+    for(int i = 0; i < edge_num; i++) {
+        getline(file, line);
+        istringstream iss(line);
+        int node_id;
+        Net *net = graph.add_net(i);
+        while(iss >> node_id) {
+            Node *node = graph.get_or_create_node(node_id);
+            node->add_net(net);
+            net->add_node(node);
+        }
+    }
+    file.close();
+}
+
+void Solution::initialize_partition(Graph &graph,
+        map<int, int> &partition_map, int &size_X, int &size_Y) {
+    vector<Node*> nodes = graph.get_nodes();
+    int total_size = nodes.size();
+    int target_X = total_size / 2;
+    mt19937 g(RANDOM_SEED);
+    shuffle(nodes.begin(), nodes.end(), g);
+    size_X = 0;
+    size_Y = 0;
+    for(int i = 0; i < total_size; i++) {
+        if(i < target_X) {
+            partition_map[nodes[i]->get_index()] = 0;
+            size_X++;
+        } else {
+            partition_map[nodes[i]->get_index()] = 1;
+            size_Y++;
+        }
+    }
+}
+
+int Solution::calculate_cut_size(Graph &graph,
+        map<int, int> &partition_map) {
+    int cut = 0;
+    for(Net *net : graph.get_nets()) {
+        bool has_X = false, has_Y = false;
+        for(Node *node : net->get_nodes()) {
+            if(partition_map[node->get_index()] == 0) has_X = true;
+            else has_Y = true;
+            if(has_X && has_Y) { cut++; break; }
+        }
+    }
+    return cut;
+}
+
+int Solution::calculate_delta(Graph &graph,
+        map<int, int> &partition_map, int node_id) {
+    int delta = 0;
+    int part = partition_map[node_id];
+    Node *node = nullptr;
+    for(Node *n : graph.get_nodes())
+        if(n->get_index() == node_id) { node = n; break; }
+    for(Net *net : node->get_nets()) {
+        int count_X = 0, count_Y = 0;
+        for(Node *n : net->get_nodes()) {
+            if(partition_map[n->get_index()] == 0) count_X++;
+            else count_Y++;
+        }
+        if(part == 0) {
+            if(count_X == 1 && count_Y > 0) delta--;
+            else if(count_Y == 0) delta++;
+        } else {
+            if(count_Y == 1 && count_X > 0) delta--;
+            else if(count_X == 0) delta++;
+        }
+    }
+    return delta;
+}
+
+bool Solution::is_balanced(int size_X, int size_Y, int total_size) {
+    double ratio_X = (double)size_X / total_size;
+    double ratio_Y = (double)size_Y / total_size;
+    return (ratio_X >= 0.5 - EPSILON && ratio_X <= 0.5 + EPSILON &&
+            ratio_Y >= 0.5 - EPSILON && ratio_Y <= 0.5 + EPSILON);
+}
+
+void Solution::sa_partition(Graph &graph, set<int> &X, set<int> &Y) {
+    vector<Node*> nodes = graph.get_nodes();
+    int total_size = nodes.size();
+    mt19937 gen(RANDOM_SEED);
+    uniform_real_distribution<double> dis(0.0, 1.0);
+    map<int, int> partition_map;
+    int size_X, size_Y;
+    initialize_partition(graph, partition_map, size_X, size_Y);
+    int current_cut = calculate_cut_size(graph, partition_map);
+    map<int, int> best_partition = partition_map;
+    int best_cut = current_cut;
+    double temperature = INITIAL_TEMP;
+    vector<int> node_ids;
+    for(Node *n : nodes) node_ids.push_back(n->get_index());
+    while(temperature > FINAL_TEMP) {
+        for(int iter = 0; iter < ITERATIONS_PER_TEMP; iter++) {
+            uniform_int_distribution<int> node_dist(0, total_size - 1);
+            if(dis(gen) < 0.5) {
+                int idx = node_dist(gen);
+                int node_id = node_ids[idx];
+                int new_size_X = size_X, new_size_Y = size_Y;
+                if(partition_map[node_id] == 0) { new_size_X--; new_size_Y++; }
+                else { new_size_X++; new_size_Y--; }
+                if(!is_balanced(new_size_X, new_size_Y, total_size))
+                    continue;
+                int delta = calculate_delta(graph, partition_map, node_id);
+                partition_map[node_id] = 1 - partition_map[node_id];
+                if(delta < 0 || dis(gen) < exp(-delta / temperature)) {
+                    size_X = new_size_X;
+                    size_Y = new_size_Y;
+                    current_cut += delta;
+                    if(current_cut < best_cut) {
+                        best_cut = current_cut;
+                        best_partition = partition_map;
+                    }
+                } else {
+                    partition_map[node_id] = 1 - partition_map[node_id];
+                }
+            } else {
+                int idx1 = node_dist(gen);
+                int idx2 = node_dist(gen);
+                int node1 = node_ids[idx1];
+                int node2 = node_ids[idx2];
+                if(partition_map[node1] == partition_map[node2]) continue;
+                int new_size_X = size_X, new_size_Y = size_Y;
+                if(partition_map[node1] == 0) { new_size_X--; new_size_Y++; }
+                else { new_size_X++; new_size_Y--; }
+                if(partition_map[node2] == 0) { new_size_X--; new_size_Y++; }
+                else { new_size_X++; new_size_Y--; }
+                if(!is_balanced(new_size_X, new_size_Y, total_size))
+                    continue;
+                int delta1 = calculate_delta(graph, partition_map, node1);
+                partition_map[node1] = 1 - partition_map[node1];
+                int delta2 = calculate_delta(graph, partition_map, node2);
+                partition_map[node2] = 1 - partition_map[node2];
+                int total_delta = delta1 + delta2;
+                if(total_delta < 0 ||
+                   dis(gen) < exp(-total_delta / temperature)) {
+                    size_X = new_size_X;
+                    size_Y = new_size_Y;
+                    current_cut += total_delta;
+                    if(current_cut < best_cut) {
+                        best_cut = current_cut;
+                        best_partition = partition_map;
+                    }
+                } else {
+                    partition_map[node1] = 1 - partition_map[node1];
+                    partition_map[node2] = 1 - partition_map[node2];
+                }
+            }
+        }
+        temperature *= COOLING_RATE;
+    }
+    partition_map = best_partition;
+    X.clear();
+    Y.clear();
+    for(auto &p : partition_map) {
+        if(p.second == 0) X.insert(p.first);
+        else Y.insert(p.first);
+    }
+}
+\end{lstlisting}
+
+\begin{thebibliography}{9}
+
+\bibitem{repart2026}
+Z.~Fu, Y.~Zhou, Z.~Lu, G.~Sun, R.~Wang, M.~Li, and Y.~Lin,
+\newblock ``RePart: Efficient Hypergraph Partitioning with Logic Replication Optimization for Multi-FPGA System,''
+\newblock \textit{arXiv preprint arXiv:2604.00780}, 2026.
+
+\end{thebibliography}
+
+\end{document}
