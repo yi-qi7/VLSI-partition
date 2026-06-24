@@ -1,10 +1,10 @@
 /**
- * @file    topopart_validate.cpp
- * @brief   TopoPart 划分校验 + 输入输出实现
+ * @file    validate.cpp
+ * @brief   校验、文件I/O与统计功能实现
  */
 
-#include "topopart_validate.h"
-#include "topopart_utils.h"
+#include "validate.h"
+#include "utils.h"
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -14,7 +14,7 @@
 using namespace std;
 
 // ================================================================
-//  校验：CheckPartitionValid
+//  校验：三大约束检查
 // ================================================================
 
 ValidationReport CheckPartitionValid(const PartitionResult& res,
@@ -61,19 +61,11 @@ ValidationReport CheckPartitionValid(const PartitionResult& res,
 
     // ----------------------------------------------------------
     // 约束3：拓扑约束（定理 III.1）
-    //   对每条网（边），检查涉及的 FPGA 集合内是否两两直连
-    //   等价：对每条边 (vi, vj)，验证：
-    //     dist_fpga(part[vi], part[vj]) ≤ dist_circuit(vi, vj)
-    //   即：FPGA 距离 ≤ 电路距离（定理 III.1 的 x ≥ y）
-    //
-    //   论文原文约束：
-    //     任意二引脚网两端节点，同FPGA OR 两块FPGA存在直连边
-    //   即：若两个 FPGA 不同，则它们之间必须有直接边（dist=1）
-    //
-    //   注意：这里检查的是「任意两节点之间的网」，
-    //   如果所有网都是二引脚（star模型），则逐边检查即可。
+    //   对每条边 (vi, vj)，验证：
+    //     若两个 FPGA 不同，则它们之间必须有直接边（dist=1）
+    //   注意：这里检查的是 star 模型下的二引脚网
     // ----------------------------------------------------------
-    // 拓扑约束验证：逐边检查（只需 FPGA 距离矩阵，不需要电路全点对矩阵）
+    // 拓扑约束验证：逐边检查，每条无向边仅计数一次（vi < vj）
     if (!fg.dist_all.empty()) {
         for (int vi = 0; vi < N; ++vi) {
             int f_vi = res.node2fpga[vi];
@@ -81,17 +73,17 @@ ValidationReport CheckPartitionValid(const PartitionResult& res,
 
             for (int vj : g.adj[vi]) {
                 if (vj >= N) continue;
+                if (vi >= vj) continue;   // 每条无向边仅计数一次
                 int f_vj = res.node2fpga[vj];
                 if (f_vj < 0) continue;
 
                 if (f_vi == f_vj) continue;  // 同 FPGA，OK
 
-                // 不同 FPGA：需要满足直接连线 OR 定理 III.1
-                // 论文硬约束：二引脚网两端 FPGA 必须有直连边（dist_fpga == 1）
+                // 不同 FPGA：需要满足直连条件（dist_fpga == 1）
                 int fpga_dist = fg.dist_all[f_vi][f_vj];
                 if (fpga_dist > 1) {
                     ++report.topology_violations;
-                    // 只报告前几条
+                    // 仅报告前几条违规详情
                     if (report.topology_violations <= 5) {
                         report.detail += "Topology violation: edge (" + to_string(vi) + "," +
                                          to_string(vj) + ") across FPGA " +
@@ -103,7 +95,7 @@ ValidationReport CheckPartitionValid(const PartitionResult& res,
         }
     }
 
-    // 汇总
+    // 汇总判定
     report.valid = (report.fixed_violations == 0 &&
                     report.resource_violations == 0 &&
                     report.topology_violations == 0);
@@ -112,7 +104,7 @@ ValidationReport CheckPartitionValid(const PartitionResult& res,
 }
 
 // ================================================================
-//  输入：ReadFPGATopology
+//  输入：读取 FPGA 拓扑文件
 // ================================================================
 
 bool ReadFPGATopology(const string& filename, FPGAGraph& fg) {
@@ -130,6 +122,7 @@ bool ReadFPGATopology(const string& filename, FPGAGraph& fg) {
     fg.adj.assign(K, vector<int>());
     fg.resource_cap.assign(K, 0);  // 默认 0 = 未设置（由调用者设置）
 
+    // 读取 FPGA 间连线
     for (int i = 0; i < M; ++i) {
         int u, v;
         file >> u >> v;
@@ -137,7 +130,7 @@ bool ReadFPGATopology(const string& filename, FPGAGraph& fg) {
         fg.adj[v].push_back(u);
     }
 
-    // 尝试读取资源容量（可选）
+    // 尝试读取资源容量（可选字段）
     string line;
     getline(file, line);  // 跳过换行
     for (int i = 0; i < K; ++i) {
@@ -161,7 +154,7 @@ bool ReadFPGATopology(const string& filename, FPGAGraph& fg) {
 }
 
 // ================================================================
-//  输入：ReadCircuitNetlist
+//  输入：读取电路网表文件
 // ================================================================
 
 bool ReadCircuitNetlist(const string& filename, CircuitGraph& g) {
@@ -185,7 +178,7 @@ bool ReadCircuitNetlist(const string& filename, CircuitGraph& g) {
     iss >> node_cnt;
     // 尝试从同一行读取 net_cnt
     if (!(iss >> net_cnt)) {
-        // net_cnt 在下一行（case1 格式：node 数和 net 数分行）
+        // net_cnt 在下一行（如 case1 格式：节点数和网数分行）
         while (getline(file, line)) {
             if (line.empty() || line[0] == '#') continue;
             istringstream iss2(line);
@@ -202,20 +195,54 @@ bool ReadCircuitNetlist(const string& filename, CircuitGraph& g) {
     g.node_num = node_cnt;
     g.adj.assign(node_cnt, vector<int>());
 
-    // 读取每条网（二引脚网格式：u v）
+    // 读取每条网
+    // Bug fix: 使用 for 循环代替 while(getline && condition)
+    //   原 while 的 getline 在 net_loaded==net_cnt 时会多读一行，
+    //   导致第一个 FPGA 的固定节点行被吞掉
     int net_loaded = 0;
-    while (getline(file, line) && net_loaded < net_cnt) {
-        if (line.empty() || line[0] == '#') continue;
-
-        istringstream edge_iss(line);
-        int u, v;
-        if (edge_iss >> u >> v) {
-            if (u >= 0 && u < node_cnt && v >= 0 && v < node_cnt) {
-                g.adj[u].push_back(v);
-                g.adj[v].push_back(u);
-                ++net_loaded;
+    for (int ni = 0; ni < net_cnt; ++ni) {
+        // 跳过空行和注释
+        while (getline(file, line)) {
+            if (line.empty() || line[0] == '#') continue;
+            break;
+        }
+        istringstream net_iss(line);
+        vector<int> net_nodes;
+        int node;
+        while (net_iss >> node) {
+            if (node >= 0 && node < node_cnt) {
+                net_nodes.push_back(node);
             }
         }
+        if (net_nodes.size() >= 2) {
+            int center = net_nodes[0];
+            for (size_t i = 1; i < net_nodes.size(); ++i) {
+                int other = net_nodes[i];
+                g.adj[center].push_back(other);
+                g.adj[other].push_back(center);
+            }
+        }
+        ++net_loaded;
+    }
+
+    // ---- 读取固定节点（第四部分） ----
+    // 剩余行：每行对应一个 FPGA，行中节点固定分配到该 FPGA
+    // 第 i 行剩余行 → FPGA i（从 0 开始编号）
+    int fixed_cnt = 0;
+    int fpga_idx = 0;
+    while (getline(file, line)) {
+        if (line.empty() || line[0] == '#') continue;
+
+        istringstream fix_iss(line);
+        int node;
+        while (fix_iss >> node) {
+            if (node >= 0 && node < node_cnt) {
+                g.fixed_nodes.insert(node);
+                g.node2fpga[node] = fpga_idx;
+                ++fixed_cnt;
+            }
+        }
+        ++fpga_idx;
     }
 
     file.close();
@@ -224,12 +251,15 @@ bool ReadCircuitNetlist(const string& filename, CircuitGraph& g) {
     g.init_move_nodes();
 
     cout << "[ReadCircuitNetlist] Loaded: " << node_cnt << " nodes, "
-         << net_loaded << " nets" << endl;
+         << net_loaded << " nets";
+    if (fixed_cnt > 0)
+        cout << ", " << fixed_cnt << " fixed nodes (" << fpga_idx << " FPGAs)";
+    cout << endl;
     return true;
 }
 
 // ================================================================
-//  输入：ReadFixedNodes
+//  输入：读取固定节点配置文件
 // ================================================================
 
 bool ReadFixedNodes(const string& filename, CircuitGraph& g) {
@@ -261,7 +291,7 @@ bool ReadFixedNodes(const string& filename, CircuitGraph& g) {
 }
 
 // ================================================================
-//  输出：ExportPartition
+//  输出：导出划分结果
 // ================================================================
 
 void ExportPartition(const string& filename, const PartitionResult& res) {
@@ -271,6 +301,7 @@ void ExportPartition(const string& filename, const PartitionResult& res) {
         return;
     }
 
+    // 每行一个整数，第 i 行 = 节点 i 分配的 FPGA id
     for (int f : res.node2fpga) {
         file << f << "\n";
     }
@@ -281,7 +312,7 @@ void ExportPartition(const string& filename, const PartitionResult& res) {
 }
 
 // ================================================================
-//  输出：PrintPartitionStats
+//  输出：打印划分结果统计
 // ================================================================
 
 void PrintPartitionStats(const PartitionResult& res, const FPGAGraph& fg) {

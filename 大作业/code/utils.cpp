@@ -1,22 +1,22 @@
 /**
- * @file    topopart_utils.cpp
- * @brief   TopoPart 工具通用函数实现
+ * @file    utils.cpp
+ * @brief   工具函数实现
  */
 
-#include "topopart_utils.h"
+#include "utils.h"
 #include <queue>
 #include <iostream>
 
 // ================================================================
-//  1. Dijkstra 全点对最短距离
+//  1. Dijkstra 全点对最短距离计算
 // ================================================================
 
 vector<vector<int>> CalcAllPairShortestPath(const vector<vector<int>>& adj, int node_cnt) {
-    // 初始化距离矩阵，默认无穷大
+    // 初始化距离矩阵，默认值为无穷大
     const int INF = INT_MAX / 2;
     vector<vector<int>> dist(node_cnt, vector<int>(node_cnt, INF));
 
-    // 对每个源点运行 Dijkstra
+    // 对每个源点运行 Dijkstra 算法
     for (int src = 0; src < node_cnt; ++src) {
         dist[src][src] = 0;
 
@@ -28,7 +28,7 @@ vector<vector<int>> CalcAllPairShortestPath(const vector<vector<int>>& adj, int 
             auto [d, u] = pq.top();
             pq.pop();
 
-            // 懒惰删除：已有更短路径则跳过
+            // 懒惰删除：若已有更短路径则跳过
             if (d > dist[src][u]) continue;
 
             for (int v : adj[u]) {
@@ -93,7 +93,7 @@ void BuildFPGADist(FPGAGraph& fg) {
 // ================================================================
 
 void BuildCircuitDist(CircuitGraph& g) {
-    // ★ 内存优化：不再预计算 N×N 全点对距离矩阵（N=300K 时需 ~360GB 内存）
+    // 内存优化：不再预计算 N×N 全点对距离矩阵（N=300K 时需约 360GB 内存）
     // 电路距离在需要时按以下规则获取：
     //   - 相邻节点（遍历 adj[]）：距离 = 1
     //   - 候选传播阶段：使用 BFSFromSource 按需计算

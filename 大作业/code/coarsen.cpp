@@ -1,6 +1,6 @@
 /**
- * @file    topopart_coarsen.cpp
- * @brief   TopoPart 模块3：候选集感知多层粗化 Coarsening 实现
+ * @file    coarsen.cpp
+ * @brief   模块3：候选集感知多层粗化实现
  *
  * 合并规则（双条件同时满足才允许合并）：
  *   条件1：两节点电路互连权重高（有直接边相连）
@@ -13,15 +13,15 @@
  *   合并为超节点，直到图规模无法再压缩。
  */
 
-#include "topopart_coarsen.h"
-#include "topopart_utils.h"
+#include "coarsen.h"
+#include "utils.h"
 #include <iostream>
 #include <stdexcept>
 #include <algorithm>
 #include <set>
 
 // ================================================================
-//  辅助：判断两个节点是否可以合并
+//  辅助函数：判断两个节点是否可以合并
 // ================================================================
 
 /**
@@ -29,7 +29,7 @@
  * @param u, v      节点 id
  * @param adj       当前层邻接表
  * @param cddt      当前层候选集数组
- * @param beta      合并阈值
+ * @param beta      合并阈值（交集大小下限）
  * @return true 表示允许合并
  */
 static bool CanMerge(int u, int v,
@@ -37,14 +37,13 @@ static bool CanMerge(int u, int v,
                      const vector<CandidateSet>& cddt,
                      int beta) {
     // 条件1：两节点必须有边相连（互连权重高）
-    // 简化：检查是否存在直接邻接关系
     bool has_edge = false;
     for (int nb : adj[u]) {
         if (nb == v) { has_edge = true; break; }
     }
     if (!has_edge) return false;
 
-    // 条件2：候选集交集大小 ≥ β (bitset 按位运算)
+    // 条件2：候选集交集大小 ≥ β（使用位图按位运算）
     uint64_t inter = cddt[u].bits & cddt[v].bits;
     return __popcnt64(inter) >= beta;
 }
@@ -55,7 +54,7 @@ static bool CanMerge(int u, int v,
 static CandidateSet ComputeSuperCddt(const CandidateSet& a, const CandidateSet& b, int K) {
     CandidateSet result(K);
     result.bits = a.bits & b.bits;
-    // 复制 T_vec
+    // 同步更新 T_vec 计数向量
     result.T_vec = a.T_vec;
     for (int f = 0; f < K; ++f) {
         if (!result.contains(f)) result.T_vec[f] = 0;
@@ -71,6 +70,7 @@ static CandidateSet ComputeSuperCddt(const CandidateSet& a, const CandidateSet& 
  * @brief 执行单层粗化
  * @param curr_graph     当前层电路图
  * @param curr_cddt      当前层候选集
+ * @param prev_weight    上层节点权重
  * @param beta           合并阈值
  * @param next_level     输出：下一粗化层级
  * @return true 表示成功进行了合并（图规模缩小），false 表示无法再合并
@@ -110,7 +110,7 @@ static bool DoOneCoarsenLevel(const CircuitGraph& curr_graph,
 
         // 寻找最佳合并候选：候选集交集最大的邻居
         int best_v = -1;
-        int best_inter = beta - 1;  // 至少需要 beta
+        int best_inter = beta - 1;  // 至少需要达到 beta
 
         for (int v : curr_graph.adj[u]) {
             if (visited[v]) continue;
@@ -118,7 +118,7 @@ static bool DoOneCoarsenLevel(const CircuitGraph& curr_graph,
 
             if (!CanMerge(u, v, curr_graph.adj, curr_cddt, beta)) continue;
 
-            // 计算交集大小 (bitset 按位运算)
+            // 计算交集大小（位图按位运算）
             int inter = (int)__popcnt64(curr_cddt[u].bits & curr_cddt[v].bits);
             if (inter > best_inter) {
                 best_inter = inter;
@@ -179,14 +179,14 @@ static bool DoOneCoarsenLevel(const CircuitGraph& curr_graph,
     next_level.super_graph.fixed_nodes.clear();
     next_level.super_graph.node2fpga.clear();
 
-    set<pair<int, int>> super_edges;  // 去重用
+    set<pair<int, int>> super_edges;  // 去重用集合
 
     for (int u = 0; u < n; ++u) {
         int su = node2super[u];
         for (int v : curr_graph.adj[u]) {
             int sv = node2super[v];
             if (su != sv) {
-                // 无向边，统一 (min, max) 去重
+                // 无向边，统一用 (min, max) 去重
                 auto edge = make_pair(min(su, sv), max(su, sv));
                 if (super_edges.insert(edge).second) {
                     next_level.super_graph.adj[su].push_back(sv);
@@ -226,7 +226,7 @@ static bool DoOneCoarsenLevel(const CircuitGraph& curr_graph,
             }
         }
 
-        // 检查是否超节点继承固定属性
+        // 检查超节点是否继承了固定属性
         if (next_level.super_cddt[sid].is_singleton()) {
             int only_fpga = next_level.super_cddt[sid].get_only_fpga();
             next_level.super_graph.fixed_nodes.insert(sid);
@@ -333,7 +333,7 @@ vector<CoarsenLevel> Coarsening(const CircuitGraph& origin_g,
 
         levels.push_back(std::move(next));
 
-        // 终止条件：图规模足够小
+        // 终止条件：图规模已足够小
         if (levels.back().super_graph.node_num <= min_super_size) {
             cout << "  [Coarsen] Reached minimum super-node count "
                  << levels.back().super_graph.node_num << ", coarsening stops." << endl;
@@ -397,7 +397,7 @@ vector<CoarsenLevel> CoarseningWithRetry(const CircuitGraph& origin_g,
             return levels;
         }
 
-        // 增大 β 重试
+        // 增大 β 后重试
         beta = max(beta + 1, (int)(beta * cfg.beta_grow_factor));
         cout << "  [CoarseningWithRetry] Empty candidate set in coarsening, increasing beta -> " << beta << endl;
     }

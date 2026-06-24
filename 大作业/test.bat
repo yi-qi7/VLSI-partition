@@ -14,7 +14,7 @@ if "%TOPO%"=="" set TOPO=MFS2
 cd /d "%~dp0"
 
 echo ========================================
-echo   GPU Multilevel K-way Partition Test
+echo    Multi-FPGA Topology-Driven Partitioning
 echo ========================================
 echo Case    : %CASE%
 echo Topo    : %TOPO%
@@ -42,7 +42,7 @@ echo.
 echo [TEST] Running...
 echo ========================================
 
-build\topopart.exe "Generated Benchmarks\%CASE%" "FPGA Graph\%TOPO%"
+build\main.exe "Generated Benchmarks\%CASE%" "FPGA Graph\%TOPO%"
 
 echo.
 echo ========================================

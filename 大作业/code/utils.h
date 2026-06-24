@@ -1,17 +1,18 @@
-#ifndef TOPOPART_UTILS_H
-#define TOPOPART_UTILS_H
+#ifndef UTILS_H
+#define UTILS_H
 
 /**
- * @file    topopart_utils.h
- * @brief   TopoPart 工具通用函数（最短路径、候选集构建）
+ * @file    utils.h
+ * @brief   通用工具函数（最短路径、候选集构建）
  *
  * 包含：
  *   1. CalcAllPairShortestPath  —— Dijkstra 全点对最短路径
  *   2. BuildS                   —— 构建距离中心点 ≤ x 的节点集合
  *   3. BuildFPGADist            —— 构建 FPGA 图全点对距离 + max_dist + S_cache
+ *   4. BuildCircuitDist         —— 电路图距离预计算（按需 BFS，O(1) 内存）
  */
 
-#include "topopart_types.h"
+#include "types.h"
 #include <queue>
 #include <algorithm>
 #include <climits>
@@ -75,7 +76,7 @@ void BFSFromSource(const vector<vector<int>>& adj, int src, int max_depth, Func&
         if (max_depth > 0 && nd > max_depth) continue;
 
         for (int v : adj[u]) {
-            if (dist[v] >= 0) continue;  // 已访问
+            if (dist[v] >= 0) continue;  // 已访问过，跳过
             dist[v] = nd;
             q.push(v);
             callback(v, nd);
@@ -103,7 +104,10 @@ void BuildFPGADist(FPGAGraph& fg);
 /**
  * @brief 为电路图计算全点对最短距离
  * @param g  电路图（传入引用，修改内部 dist_all）
+ *
+ * 当前实现采用按需 BFS 策略，不再预计算 N×N 矩阵，
+ * 以节省大规模电路（N>100K）时的内存
  */
 void BuildCircuitDist(CircuitGraph& g);
 
-#endif // TOPOPART_UTILS_H
+#endif // UTILS_H

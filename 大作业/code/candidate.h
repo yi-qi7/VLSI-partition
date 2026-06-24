@@ -1,9 +1,9 @@
-#ifndef TOPOPART_CANDIDATE_H
-#define TOPOPART_CANDIDATE_H
+#ifndef CANDIDATE_H
+#define CANDIDATE_H
 
 /**
- * @file    topopart_candidate.h
- * @brief   TopoPart 模块2：候选 FPGA 传播 CandidateFPGAPropagation（Algorithm 1）
+ * @file    candidate.h
+ * @brief   模块2：候选 FPGA 传播（算法1）
  *
  * 论文 Algorithm 1: Candidate FPGA Set Propagation
  *
@@ -27,13 +27,13 @@
  *   即：Cddt[vj] = Cddt[vj] ∩ Ŝ(v̂i, k)
  */
 
-#include "topopart_types.h"
+#include "types.h"
 #include <queue>
 #include <utility>
 
 /**
  * @brief 候选 FPGA 传播主函数
- * @param g   原始电路图（需预先计算 dist_all）
+ * @param g   原始电路图（需已构建邻接表）
  * @param fg  FPGA 拓扑图（需预先计算 dist_all / max_dist / S_cache）
  * @return 每个电路节点的初始化候选集 Cddt 数组（长度 = g.node_num）
  *
@@ -47,14 +47,14 @@
  *      - 可移动节点候选集 = 全部 FPGA
  *   3. 队列 queue<pair<int,int>> q：存储 (固定节点 id, 绑定 FPGA id)，所有固定节点入队
  *   4. 循环弹出队列元素 (vi, v̂i)：
- *      a. d = fg.max_dist[v̂i]；构建 S(vi, d)：电路上距离 vi < d 的所有可移动节点 vj
- *      b. k = g.dist_all[vi][vj]（电路距离）；取出 Ŝ(v̂i, k)（FPGA 距离 ≤ k 的 FPGA 集）
- *      c. Cddt[vj].fpga_set = Cddt[vj].fpga_set ∩ Ŝ(v̂i, k)；同步更新 T_vec 计数
+ *      a. d = fg.max_dist[v̂i]；对距离 vi < d 的所有可移动节点 vj 执行 BFS
+ *      b. k = BFS 距离（电路距离）；取出 Ŝ(v̂i, k)（FPGA 距离 ≤ k 的 FPGA 集）
+ *      c. Cddt[vj] = Cddt[vj] ∩ Ŝ(v̂i, k)
  *      d. 分支判定：
- *         - 若 Cddt[vj].fpga_set.size() == 1：vj 转为新固定节点，(vj, 唯一FPGA) 入队
- *         - 若 Cddt[vj].fpga_set.empty()：抛出异常，无可行拓扑划分解
+ *         - 若 Cddt[vj] 为单元素：vj 转为新固定节点，(vj, 唯一FPGA) 入队
+ *         - 若 Cddt[vj] 为空：抛出异常，无可行拓扑划分解
  *   5. 返回完整候选集数组
  */
 vector<CandidateSet> CandidateFPGAPropagation(CircuitGraph& g, FPGAGraph& fg);
 
-#endif // TOPOPART_CANDIDATE_H
+#endif // CANDIDATE_H

@@ -1,9 +1,9 @@
-#ifndef TOPOPART_VALIDATE_H
-#define TOPOPART_VALIDATE_H
+#ifndef VALIDATE_H
+#define VALIDATE_H
 
 /**
- * @file    topopart_validate.h
- * @brief   TopoPart 划分合法性校验 + 输入输出模块
+ * @file    validate.h
+ * @brief   划分合法性校验 + 输入输出模块
  *
  * 校验接口 CheckPartitionValid：
  *   自动校验拓扑 / 资源 / 固定节点三大约束，输出违规数量
@@ -12,7 +12,7 @@
  *   支持读取自定义网表、FPGA 拓扑、固定节点配置
  */
 
-#include "topopart_types.h"
+#include "types.h"
 #include <string>
 
 // ================================================================
@@ -20,7 +20,7 @@
 // ================================================================
 
 /**
- * @brief 校验结果结构
+ * @brief 校验结果结构体
  */
 struct ValidationReport {
     bool valid;                         // 整体是否合法（三大约束全部满足）
@@ -61,18 +61,19 @@ ValidationReport CheckPartitionValid(const PartitionResult& res,
  * 文件格式（纯文本）：
  *   第1行：fpga_num  edge_num
  *   后续每行：u v（一条无向边，0-indexed）
- *   后续：每行一个 int 表示该 FPGA 资源容量（共 fpga_num 行）
+ *   后续：每行一个 int 表示该 FPGA 资源容量（共 fpga_num 行，可选）
  */
 bool ReadFPGATopology(const string& filename, FPGAGraph& fg);
 
 /**
- * @brief 读取电路网表文件（二引脚网格式）
+ * @brief 读取电路网表文件（多引脚网格式，内部转为 star 模型的二引脚网）
  * @param filename  文件路径
  * @param g         输出电路图
  *
  * 文件格式（纯文本）：
- *   第1行：node_num  net_num
- *   后续每行：u v（一个二引脚网连接的两个节点）
+ *   第1行：node_num  net_num（可分行）
+ *   后续每行：一组节点 id（一条多引脚网）
+ *   后续：每行一组固定到该 FPGA 的节点 id（可选）
  */
 bool ReadCircuitNetlist(const string& filename, CircuitGraph& g);
 
@@ -101,8 +102,10 @@ bool ReadFixedNodes(const string& filename, CircuitGraph& g);
 void ExportPartition(const string& filename, const PartitionResult& res);
 
 /**
- * @brief 导出划分结果汇总统计
+ * @brief 打印划分结果汇总统计
+ * @param res  划分结果
+ * @param fg   FPGA 拓扑图（提供资源容量信息）
  */
 void PrintPartitionStats(const PartitionResult& res, const FPGAGraph& fg);
 
-#endif // TOPOPART_VALIDATE_H
+#endif // VALIDATE_H

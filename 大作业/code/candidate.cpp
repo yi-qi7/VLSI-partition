@@ -1,6 +1,6 @@
 /**
- * @file    topopart_candidate.cpp
- * @brief   TopoPart 模块2：候选 FPGA 传播实现（Algorithm 1）
+ * @file    candidate.cpp
+ * @brief   模块2：候选 FPGA 传播（算法1）实现
  *
  * 论文 Algorithm 1: Candidate FPGA Set Propagation
  *
@@ -14,8 +14,8 @@
  *     → 违反定理 III.1 的 x ≥ y 条件 → 拓扑违规。
  */
 
-#include "topopart_candidate.h"
-#include "topopart_utils.h"
+#include "candidate.h"
+#include "utils.h"
 #include <iostream>
 #include <stdexcept>
 #include <algorithm>
@@ -62,7 +62,7 @@ vector<CandidateSet> CandidateFPGAPropagation(CircuitGraph& g, FPGAGraph& fg) {
     }
 
     // ----------------------------------------------------------
-    // 步骤3：初始化队列 q
+    // 步骤3：初始化传播队列 q
     //   队列元素：(固定节点 id, 绑定 FPGA id)
     // ----------------------------------------------------------
     queue<pair<int, int>> q;
@@ -73,7 +73,7 @@ vector<CandidateSet> CandidateFPGAPropagation(CircuitGraph& g, FPGAGraph& fg) {
 
     // 记录哪些可移动节点已转为固定节点（避免重复入队）
     // fixed_nodes 集合已包含所有固定节点（包括传播中新固定的）
-    // 我们通过检查 cddt[vj].is_singleton() 来判断
+    // 通过检查 cddt[vj].is_singleton() 来判断
 
     // ----------------------------------------------------------
     // 步骤4：主传播循环（BFS 风格）
@@ -89,7 +89,7 @@ vector<CandidateSet> CandidateFPGAPropagation(CircuitGraph& g, FPGAGraph& fg) {
         // a. d = maxDist(v̂i)：FPGA v̂i 到所有 FPGA 的最大最短距离
         int d = fg.max_dist[v_hat_i];
 
-        // ★ 内存优化：不再使用预计算的 N×N 距离矩阵（N=300K 时需 ~360GB）
+        // 内存优化：不再使用预计算的 N×N 距离矩阵（N=300K 时需约 360GB）
         // 改用按需 BFS，以 vi 为源点，深度 < d
         // 定理 III.1：对于 BFS 发现的每个节点 vj（距离 k < d），
         //   收缩候选集 Cddt[vj] = Cddt[vj] ∩ Ŝ(v̂i, k)
@@ -106,7 +106,7 @@ vector<CandidateSet> CandidateFPGAPropagation(CircuitGraph& g, FPGAGraph& fg) {
                 const unordered_set<int>& S_hat = fg.get_S(v_hat_i, k);
 
                 // c. 收缩候选集：Cddt[vj] = Cddt[vj] ∩ Ŝ(v̂i, k)
-                bool changed = cddt[vj].intersect_with_check(S_hat, K);
+                bool changed = cddt[vj].intersect_with_check(S_hat);
 
                 // d. 分支判定
                 if (cddt[vj].empty()) {
@@ -132,7 +132,7 @@ vector<CandidateSet> CandidateFPGAPropagation(CircuitGraph& g, FPGAGraph& fg) {
     }
 
     // ----------------------------------------------------------
-    // 步骤5：输出统计
+    // 步骤5：输出统计信息
     // ----------------------------------------------------------
     cout << "  Propagation rounds: " << propagation_round << endl;
     cout << "  Newly fixed nodes: " << new_fixed_count << endl;
